@@ -1,6 +1,7 @@
 import os
 import asyncio
 import pathlib
+import re
 from pathlib import Path
 from agent_bot import config
 
@@ -82,21 +83,47 @@ FORBIDDEN_COMMANDS = [
 
 def verify_path_safe(path_str: str) -> str:
     """Verifies that the target path does not escape from the config.WORK_DIR."""
-    resolved_work_dir = Path(config.WORK_DIR).resolve()
-    p = Path(path_str)
+    resolved_work_dir = os.path.realpath(config.WORK_DIR)
     
-    if p.is_absolute():
-        target_path = p.resolve()
+    if os.path.isabs(path_str):
+        resolved_target = os.path.realpath(path_str)
     else:
-        target_path = resolved_work_dir.joinpath(p).resolve()
+        resolved_target = os.path.realpath(os.path.join(resolved_work_dir, path_str))
         
     try:
         # Check if target_path is relative to (inside or equal to) resolved_work_dir
-        target_path.relative_to(resolved_work_dir)
+        Path(resolved_target).relative_to(Path(resolved_work_dir))
     except ValueError:
         raise PermissionError("Access denied: path is outside the workspace directory.")
         
-    return str(target_path)
+    return resolved_target
+
+def get_safe_env() -> dict:
+    """Returns a copy of os.environ with sensitive environment variables filtered out."""
+    safe_env = {}
+    sensitive_keys = {"telegram_token", "anthropic_api_key", "allowed_user_id"}
+    sensitive_keywords = {"token", "key", "secret", "password", "auth", "passcode"}
+    for k, v in os.environ.items():
+        k_lower = k.lower()
+        if k_lower in sensitive_keys or any(kw in k_lower for kw in sensitive_keywords):
+            continue
+        safe_env[k] = v
+    return safe_env
+
+def check_redirections(command: str):
+    """Parses command for redirection operators and verifies that targets are safe."""
+    pattern = r'(?:\d+|\*|&)?(?:>>|>|<)\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s&|;<>]+))'
+    for match in re.finditer(pattern, command):
+        target = match.group(1) or match.group(2) or match.group(3)
+        if target:
+            # Allow /dev/null and nul (case-insensitive) as safe targets
+            if target.lower() in ("/dev/null", "nul"):
+                continue
+            # Check for env vars or shell expansion in target
+            if any(char in target for char in ('$', '%', '`')):
+                raise PermissionError("Access denied: Redirection to dynamic or environment-based paths is blocked.")
+            # Verify target path safety
+            verify_path_safe(target)
 
 async def execute_run_command(command: str, timeout: int = 30) -> str:
     # Safety checks
@@ -106,10 +133,18 @@ async def execute_run_command(command: str, timeout: int = 30) -> str:
             return f"Error: Command is blocked for safety. Found forbidden sequence: '{forbidden}'"
             
     try:
+        check_redirections(command)
+    except PermissionError as e:
+        return f"Error: Command is blocked for safety. {str(e)}"
+
+    try:
+        # Filter env
+        safe_env = get_safe_env()
         # Run process
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=config.WORK_DIR,
+            env=safe_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )

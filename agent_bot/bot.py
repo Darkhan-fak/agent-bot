@@ -2,6 +2,7 @@ import os
 import uuid
 import logging
 import asyncio
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -30,6 +31,18 @@ def check_user(func):
         return await func(update, context)
     return wrapper
 
+def auth_required(func):
+    """Decorator to check if the session is unlocked (authorized)."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not config.IS_AUTHORIZED:
+            if update.message:
+                await update.message.reply_text("🔒 Bot is locked. Please unlock by typing `/auth <code>`.")
+            elif update.callback_query:
+                await update.callback_query.answer("🔒 Bot is locked.", show_alert=True)
+            return
+        return await func(update, context)
+    return wrapper
+
 def split_text(text: str, max_chars: int = 4000) -> list[str]:
     """Splits text into chunks of at most max_chars."""
     if len(text) <= max_chars:
@@ -50,6 +63,7 @@ def split_text(text: str, max_chars: int = 4000) -> list[str]:
     return chunks
 
 @check_user
+@auth_required
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends start message."""
     await update.message.reply_text(
@@ -58,6 +72,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 @check_user
+@auth_required
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reports status of the agent."""
     global active_task, current_task_desc
@@ -68,6 +83,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status, parse_mode="Markdown")
 
 @check_user
+@auth_required
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancels the current running agent task."""
     global active_task, current_task_desc
@@ -85,6 +101,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No active agent task is running.")
 
 @check_user
+@auth_required
 async def handle_dir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays or changes the WORK_DIR configuration."""
     if not context.args:
@@ -198,6 +215,27 @@ async def run_agent_flow(task_text: str, update: Update, context: ContextTypes.D
         current_task_desc = None
 
 @check_user
+async def handle_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verifies the passcode to unlock the bot session."""
+    if config.IS_AUTHORIZED:
+        await update.message.reply_text("✅ Bot is already unlocked.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Please provide the passcode: `/auth <code>`", parse_mode="Markdown")
+        return
+
+    user_code = context.args[0].strip()
+    if user_code == str(config.PASSCODE):
+        config.IS_AUTHORIZED = True
+        await update.message.reply_text("🔓 Bot successfully unlocked! Ready for tasks.")
+        logger.info("Bot successfully unlocked via passcode.")
+    else:
+        await update.message.reply_text("❌ Incorrect passcode. Access denied.")
+        logger.warning(f"Failed auth attempt with passcode: {user_code}")
+
+@check_user
+@auth_required
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes either text tasks or captures secret inputs if requested."""
     global active_task, current_task_desc
@@ -236,6 +274,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_task = asyncio.create_task(run_agent_flow(task_text, update, context))
 
 @check_user
+@auth_required
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles inline keyboard responses (approve/reject buttons)."""
     query = update.callback_query
@@ -265,6 +304,13 @@ def main():
         logger.critical("ALLOWED_USER_ID environment variable is missing or invalid. Exiting.")
         return
 
+    # Generate a random 4-digit passcode
+    config.PASSCODE = str(random.randint(1000, 9999))
+    print("\n" + "="*50)
+    print(f"BOT STARTUP PASSCODE: {config.PASSCODE}")
+    print("="*50 + "\n")
+    logger.info(f"BOT STARTUP PASSCODE GENERATED: {config.PASSCODE}")
+
     logger.info("Initializing AgentBot Telegram application...")
     application = ApplicationBuilder().token(config.TELEGRAM_TOKEN).build()
     
@@ -273,6 +319,7 @@ def main():
     application.add_handler(CommandHandler("status", handle_status))
     application.add_handler(CommandHandler("cancel", handle_cancel))
     application.add_handler(CommandHandler("dir", handle_dir))
+    application.add_handler(CommandHandler("auth", handle_auth))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     

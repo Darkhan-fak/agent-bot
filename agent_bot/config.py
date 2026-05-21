@@ -46,6 +46,11 @@ logger.info(f"WORK_DIR set to: {WORK_DIR}")
 MODEL = os.getenv("MODEL", "claude-3-5-sonnet-20241022")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
 
+# Passcode verification state
+IS_AUTHORIZED = False
+PASSCODE = None
+
+
 def update_work_dir(new_path: str) -> bool:
     """Updates the WORK_DIR dynamically if path exists."""
     global WORK_DIR
