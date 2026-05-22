@@ -16,6 +16,53 @@ Imagine you are out for a coffee or on a bus and realize a critical bug or a sim
 
 ---
 
+## 💬 Chat Interaction Showcase
+
+Here is how a real session interaction with `AgentBot` looks directly from Telegram:
+
+```
+[Console Startup Log]
+🔑 One-time Telegram auth passcode generated: [ 8329 ]
+------------------------------------------------------
+
+[Telegram Chat with @MyPrivateCoderBot]
+
+👤 User:
+/start
+
+🤖 Bot:
+🔐 Bot session is currently locked.
+Please enter your 4-digit terminal passcode:
+Command: `/auth <code>`
+
+👤 User:
+/auth 8329
+
+🤖 Bot:
+✅ Session unlocked successfully!
+Authorized User ID: 123456789
+Working directory: /Users/darkhan/Desktop/Private/agent-bot
+
+👤 User:
+Run the test suite and verify if tests pass.
+
+🤖 Bot:
+🧠 Agent starting task...
+📂 Listing workspace files...
+🛠️ Executing: `python -m pytest`
+...
+✅ Task completed!
+All 8 test cases passed successfully.
+
+👤 User:
+/status
+
+🤖 Bot:
+💤 Agent is currently idle. Ready for your next coding task!
+```
+
+---
+
 ## 📂 Architecture
 
 Below is the workflow showing how AgentBot safely communicates between Telegram and your local directory:
