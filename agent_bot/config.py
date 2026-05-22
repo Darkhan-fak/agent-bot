@@ -21,13 +21,15 @@ logger = logging.getLogger("agent_bot")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USER_ID_STR = os.getenv("ALLOWED_USER_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "any")
 
 if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN is missing from environment variables!")
 if not ALLOWED_USER_ID_STR:
     logger.error("ALLOWED_USER_ID is missing from environment variables!")
-if not ANTHROPIC_API_KEY:
-    logger.error("ANTHROPIC_API_KEY is missing from environment variables!")
+if not ANTHROPIC_API_KEY and not OPENAI_API_BASE:
+    logger.error("Neither ANTHROPIC_API_KEY nor OPENAI_API_BASE is set in environment variables!")
 
 try:
     ALLOWED_USER_ID = int(ALLOWED_USER_ID_STR) if ALLOWED_USER_ID_STR else None

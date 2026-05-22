@@ -1,21 +1,165 @@
 import json
 import logging
+import httpx
 from anthropic import AsyncAnthropic
 from agent_bot import config, tools
 
 logger = logging.getLogger("agent_bot.agent")
 
+class MockBlock:
+    def __init__(self, block_type, **kwargs):
+        self.type = block_type
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+class MockResponse:
+    def __init__(self, content, stop_reason):
+        self.content = content
+        self.stop_reason = stop_reason
+
+async def get_openai_completion(messages: list, system_prompt: str) -> MockResponse:
+    """
+    Translates Anthropic-formatted messages and tools schemas into OpenAI-compatible format,
+    sends request to config.OPENAI_API_BASE, and maps responses back to Anthropic structures.
+    """
+    openai_messages = []
+    
+    if system_prompt:
+        openai_messages.append({"role": "system", "content": system_prompt})
+        
+    tool_id_to_name = {}
+    
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        
+        if role == "user":
+            if isinstance(content, str):
+                openai_messages.append({"role": "user", "content": content})
+            elif isinstance(content, list):
+                for block in content:
+                    if block.get("type") == "tool_result":
+                        tool_use_id = block["tool_use_id"]
+                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                        openai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "name": tool_name,
+                            "content": block.get("content", "")
+                        })
+                    else:
+                        openai_messages.append({"role": "user", "content": str(block)})
+        elif role == "assistant":
+            if isinstance(content, str):
+                openai_messages.append({"role": "assistant", "content": content})
+            elif isinstance(content, list):
+                openai_msg = {"role": "assistant"}
+                text_parts = []
+                tool_calls = []
+                for block in content:
+                    if block.get("type") == "text":
+                        text_parts.append(block["text"])
+                    elif block.get("type") == "tool_use":
+                        tool_id = block["id"]
+                        t_name = block["name"]
+                        tool_id_to_name[tool_id] = t_name
+                        tool_calls.append({
+                            "id": tool_id,
+                            "type": "function",
+                            "function": {
+                                "name": t_name,
+                                "arguments": json.dumps(block["input"])
+                            }
+                        })
+                if text_parts:
+                    openai_msg["content"] = "\n".join(text_parts)
+                if tool_calls:
+                    openai_msg["tool_calls"] = tool_calls
+                openai_messages.append(openai_msg)
+
+    openai_tools = []
+    for t in tools.TOOLS_SCHEMA:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"]
+            }
+        })
+        
+    payload = {
+        "model": config.MODEL,
+        "messages": openai_messages,
+        "tools": openai_tools,
+        "max_tokens": config.MAX_TOKENS
+    }
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    if config.OPENAI_API_KEY:
+        headers["Authorization"] = f"Bearer {config.OPENAI_API_KEY}"
+        
+    logger.info(f"Sending payload to OpenAI base {config.OPENAI_API_BASE}: {json.dumps(payload, ensure_ascii=False)[:300]}...")
+    
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{config.OPENAI_API_BASE.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers
+        )
+        response.raise_for_status()
+        resp_data = response.json()
+        
+    choice = resp_data["choices"][0]
+    message = choice["message"]
+    finish_reason = choice.get("finish_reason")
+    
+    content_blocks = []
+    
+    text_content = message.get("content")
+    if text_content:
+        content_blocks.append(MockBlock("text", text=text_content))
+        
+    tool_calls = message.get("tool_calls", [])
+    for tc in tool_calls:
+        tc_id = tc["id"]
+        tc_name = tc["function"]["name"]
+        tc_args_str = tc["function"]["arguments"]
+        
+        # In some providers, the arguments might already be a dict/object
+        if isinstance(tc_args_str, str):
+            try:
+                tc_args = json.loads(tc_args_str)
+            except Exception:
+                tc_args = tc_args_str
+        else:
+            tc_args = tc_args_str
+            
+        content_blocks.append(MockBlock("tool_use", id=tc_id, name=tc_name, input=tc_args))
+        
+    stop_reason = "end_turn"
+    if finish_reason == "tool_calls" or tool_calls:
+        stop_reason = "tool_use"
+        
+    return MockResponse(content_blocks, stop_reason)
+
+
 async def run_agent(task: str, status_callback, approval_callback) -> str:
     """
-    Main asynchronous agent loop that communicates with Anthropic Claude.
+    Main asynchronous agent loop that communicates with Anthropic Claude or OpenAI-compatible backend.
     Keeps conversation history, parses tool calls, executes them, and feeds responses back.
     """
-    if not config.ANTHROPIC_API_KEY:
-        error_msg = "Anthropic API Key is not set in config/environment!"
+    if not config.ANTHROPIC_API_KEY and not config.OPENAI_API_BASE:
+        error_msg = "Neither ANTHROPIC_API_KEY nor OPENAI_API_BASE is set in environment variables!"
         await status_callback(f"❌ {error_msg}")
         return error_msg
 
-    client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+    if not config.OPENAI_API_BASE:
+        client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+    else:
+        client = None
     
     system_prompt = (
         "You are a coding agent with access to the user's project directory.\n"
@@ -32,21 +176,24 @@ async def run_agent(task: str, status_callback, approval_callback) -> str:
     
     while True:
         try:
-            logger.info("Sending request to Anthropic API...")
-            response = await client.messages.create(
-                model=config.MODEL,
-                max_tokens=config.MAX_TOKENS,
-                system=system_prompt,
-                messages=messages,
-                tools=tools.TOOLS_SCHEMA
-            )
+            logger.info("Sending request to LLM API...")
+            if client:
+                response = await client.messages.create(
+                    model=config.MODEL,
+                    max_tokens=config.MAX_TOKENS,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools.TOOLS_SCHEMA
+                )
+            else:
+                response = await get_openai_completion(messages, system_prompt)
         except Exception as e:
-            error_msg = f"Anthropic API Error: {str(e)}"
+            error_msg = f"LLM API Error: {str(e)}"
             logger.error(error_msg, exc_info=True)
             await status_callback(f"❌ {error_msg}")
             return error_msg
 
-        logger.info(f"Received response from Anthropic. Stop reason: {response.stop_reason}")
+        logger.info(f"Received response from LLM. Stop reason: {response.stop_reason}")
 
         assistant_content = []
         tool_results_content = []
